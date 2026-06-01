@@ -59,7 +59,6 @@ const cfg = {
   calendlySecret: process.env.CALENDLY_WEBHOOK_SECRET,
   webhookPort: parseInt(process.env.WEBHOOK_PORT ?? '3000'),
   gcal: {
-    keyPath: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH ?? './google-service-account.json',
     calendarId: process.env.GOOGLE_CALENDAR_ID ?? 'primary',
     pollSeconds: parseInt(process.env.GOOGLE_CALENDAR_POLL_SECONDS ?? '60'),
   },
@@ -597,7 +596,6 @@ client.once(Events.ClientReady, async (c) => {
   await registerCommands();
   app.listen(cfg.webhookPort, () => console.log(`Webhook server on port ${cfg.webhookPort}`));
   startCalendarPoller({
-    serviceAccountKeyPath: cfg.gcal.keyPath,
     calendarId: cfg.gcal.calendarId,
     pollSeconds: cfg.gcal.pollSeconds,
     onNewBooking: onGCalNewBooking,

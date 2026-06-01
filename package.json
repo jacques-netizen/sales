@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "setup": "node setup/setup.js",
+    "gcal-auth": "node setup/gcal-auth.js",
     "bot": "node bot/index.js",
     "start": "node bot/index.js"
   },
