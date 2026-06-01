@@ -45,11 +45,6 @@ const cfg = {
     closer: process.env.ROLE_CLOSER_ID,
     setter: process.env.ROLE_SETTER_ID,
   },
-  users: {
-    abdellah: process.env.USER_ABDELLAH_ID,
-    axel: process.env.USER_AXEL_ID,
-    jacques: process.env.USER_JACQUES_ID,
-  },
   sla: {
     setter: parseInt(process.env.SLA_PING_SETTER_MIN ?? '5'),
     closer: parseInt(process.env.SLA_PING_CLOSER_MIN ?? '10'),
@@ -152,7 +147,7 @@ async function captureNewLead(data) {
       `**Contact:** ${data.contact}`,
       `**Offer interest:** ${data.offerInterest ?? 'TBD'}`,
       inCoverage()
-        ? `⏱️ SLA clock running — <@${cfg.users.abdellah}> respond within ${cfg.sla.setter} min.`
+        ? `⏱️ SLA clock running — <@&${cfg.roles.setter}> respond within ${cfg.sla.setter} min.`
         : `🌙 Outside coverage hours — auto-ack sent, desk picks up when online.`,
     ].join('\n'),
   });
@@ -165,7 +160,7 @@ async function captureNewLead(data) {
   await setterDesk.send({
     content: [
       `📬 **Auto-ack fired** for **${data.leadName}**`,
-      `> "Got your message — Abdellah will be right with you."`,
+      `> "Got your message — a teammate will be right with you."`,
       `\nDeal thread: ${thread.url}`,
     ].join('\n'),
   });
@@ -197,22 +192,19 @@ cron.schedule('* * * * *', async () => {
     const ageMin = (now - lead.capturedAt) / 60000;
 
     const checks = [
-      { threshold: cfg.sla.founder, level: 'founder', user: cfg.users.jacques, label: `🚨 <@${cfg.users.jacques}> (Founder) — lead has been untouched for ${cfg.sla.founder} min!` },
-      { threshold: cfg.sla.closer, level: 'closer', user: cfg.users.axel, label: `⚠️ <@${cfg.users.axel}> (Closer) — lead untouched for ${cfg.sla.closer} min.` },
-      { threshold: cfg.sla.setter, level: 'setter', user: cfg.users.abdellah, label: `⏰ <@${cfg.users.abdellah}> (Setter) — new lead **${lead.leadName}** has been waiting ${cfg.sla.setter} min.` },
+      { threshold: cfg.sla.founder, level: 'founder', label: `🚨 <@&${cfg.roles.founder}> — lead **${lead.leadName}** untouched for ${cfg.sla.founder} min!` },
+      { threshold: cfg.sla.closer, level: 'closer', label: `⚠️ <@&${cfg.roles.closer}> — lead **${lead.leadName}** untouched for ${cfg.sla.closer} min.` },
+      { threshold: cfg.sla.setter, level: 'setter', label: `⏰ <@&${cfg.roles.setter}> — new lead **${lead.leadName}** waiting ${cfg.sla.setter} min.` },
     ];
 
+    const setterDesk = await guild.channels.fetch(cfg.channels.setterDesk);
     for (const check of checks) {
       if (ageMin >= check.threshold && !lead.escalations.has(check.level)) {
         lead.escalations.add(check.level);
-        try {
-          const target = await guild.members.fetch(check.user);
-          await target.send(`${check.label}\nDeal: ${lead.threadUrl}`);
-        } catch {
-          // DM failed — fall back to setter-desk
-          const setterDesk = await guild.channels.fetch(cfg.channels.setterDesk);
-          await setterDesk.send(`${check.label}\nDeal: ${lead.threadUrl}`);
-        }
+        await setterDesk.send({
+          content: `${check.label}\nDeal: ${lead.threadUrl}`,
+          allowedMentions: { roles: [cfg.roles.founder, cfg.roles.closer, cfg.roles.setter] },
+        });
       }
     }
   }
@@ -276,14 +268,15 @@ async function handleCalendlyEvent(event) {
           )
           .setTimestamp(),
       ],
-      content: `<@${cfg.users.axel}> new call in queue ↑`,
+      content: `<@&${cfg.roles.closer}> new call in queue ↑`,
+      allowedMentions: { roles: [cfg.roles.closer] },
     });
 
     // T-24h and T-1h reminders are handled by Calendly's native workflows.
     // The bot registers a note in setter-desk for awareness.
-    await setterDesk.send(
-      `✅ **${inviteeName}** booked. Calendly reminders set for T-24h & T-1h.${thread ? `\nDeal: ${thread.url}` : ''}`
-    );
+    await setterDesk.send({
+      content: `✅ **${inviteeName}** booked. Calendly reminders set for T-24h & T-1h.${thread ? `\nDeal: ${thread.url}` : ''}`,
+    });
   }
 
   if (type === 'invitee.canceled') {
@@ -294,8 +287,9 @@ async function handleCalendlyEvent(event) {
         cancelReason ? `Reason: ${cancelReason}` : '',
         rescheduleUrl ? `Reschedule link: ${rescheduleUrl}` : '',
         thread ? `Deal: ${thread.url}` : '',
-        `<@${cfg.users.abdellah}> run rebook sequence.`,
+        `<@&${cfg.roles.setter}> run rebook sequence.`,
       ].filter(Boolean).join('\n'),
+      allowedMentions: { roles: [cfg.roles.setter] },
     });
   }
 
@@ -308,8 +302,9 @@ async function handleCalendlyEvent(event) {
         `🚫 **No-show — ${inviteeName}**`,
         `Deal moved back to 🔍 qualifying (not lost).`,
         thread ? `Deal: ${thread.url}` : '',
-        `<@${cfg.users.abdellah}> run same-day rebook sequence now.`,
+        `<@&${cfg.roles.setter}> run same-day rebook sequence now.`,
       ].join('\n'),
+      allowedMentions: { roles: [cfg.roles.setter] },
     });
   }
 }
@@ -417,7 +412,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `**Amount:** $${amount.toLocaleString()}`,
           `**Deal thread:** ${thread.url}`,
           '',
-          `Next step: fill in the brief below, then Patrick picks up fulfillment.`,
+          `Next step: fill in the brief below, then <@&${cfg.roles.founder}> picks up fulfillment handoff.`,
           '',
           '**Onboarding brief:**',
           '- Package / deliverable:',
