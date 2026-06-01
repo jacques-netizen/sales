@@ -26,6 +26,7 @@ import cron from 'node-cron';
 import { DateTime } from 'luxon';
 import crypto from 'crypto';
 import 'dotenv/config';
+import { startCalendarPoller } from './calendar.js';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,11 @@ const cfg = {
   },
   calendlySecret: process.env.CALENDLY_WEBHOOK_SECRET,
   webhookPort: parseInt(process.env.WEBHOOK_PORT ?? '3000'),
+  gcal: {
+    keyPath: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_PATH ?? './google-service-account.json',
+    calendarId: process.env.GOOGLE_CALENDAR_ID ?? 'primary',
+    pollSeconds: parseInt(process.env.GOOGLE_CALENDAR_POLL_SECONDS ?? '60'),
+  },
 };
 
 // ─── In-memory state ─────────────────────────────────────────────────────────
@@ -521,10 +527,82 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', leads: newLeads.size 
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
+// ─── Google Calendar handlers (Calendly-via-GCal path) ───────────────────────
+
+async function findDealThreadByName(forum, name) {
+  const threads = await forum.threads.fetchActive();
+  const first = name.toLowerCase().split(' ')[0];
+  return threads.threads.find((t) => t.name.toLowerCase().includes(first)) ?? null;
+}
+
+async function onGCalNewBooking(parsed) {
+  try {
+    const guild = await client.guilds.fetch(cfg.guildId);
+    const bookedCallsChannel = await guild.channels.fetch(cfg.channels.bookedCalls);
+    const forum = await guild.channels.fetch(cfg.channels.dealsForum);
+
+    const thread = await findDealThreadByName(forum, parsed.inviteeName);
+    if (thread) await moveDealTag(thread, forum, '📅 call-booked');
+
+    const ts = parsed.startTime ? Math.floor(new Date(parsed.startTime).getTime() / 1000) : null;
+
+    await bookedCallsChannel.send({
+      content: `<@&${cfg.roles.closer}> new call in queue ↑`,
+      allowedMentions: { roles: [cfg.roles.closer] },
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle('📅 Call Booked (via Calendly → Google Calendar)')
+          .addFields(
+            { name: 'Lead', value: parsed.inviteeName || '—', inline: true },
+            { name: 'Email', value: parsed.inviteeEmail || '—', inline: true },
+            { name: 'Event', value: parsed.eventName || '—', inline: true },
+            { name: 'Time', value: ts ? `<t:${ts}:F>` : 'TBD', inline: false },
+            { name: 'Calendly link', value: parsed.calendlyLink || '—', inline: false },
+            { name: 'Deal thread', value: thread ? thread.url : '— (no matching deal — create one)', inline: false },
+          )
+          .setTimestamp(),
+      ],
+    });
+  } catch (err) {
+    console.error('onGCalNewBooking failed:', err);
+  }
+}
+
+async function onGCalCancellation(parsed) {
+  try {
+    const guild = await client.guilds.fetch(cfg.guildId);
+    const forum = await guild.channels.fetch(cfg.channels.dealsForum);
+    const setterDesk = await guild.channels.fetch(cfg.channels.setterDesk);
+
+    const thread = await findDealThreadByName(forum, parsed.inviteeName);
+    if (thread) await moveDealTag(thread, forum, '🔍 qualifying');
+
+    await setterDesk.send({
+      content: [
+        `⚠️ **Booking removed — ${parsed.inviteeName}**`,
+        `Event vanished from the calendar (cancellation or reschedule).`,
+        thread ? `Deal moved back to 🔍 qualifying — ${thread.url}` : '',
+        `<@&${cfg.roles.setter}> run rebook sequence.`,
+      ].filter(Boolean).join('\n'),
+      allowedMentions: { roles: [cfg.roles.setter] },
+    });
+  } catch (err) {
+    console.error('onGCalCancellation failed:', err);
+  }
+}
+
 client.once(Events.ClientReady, async (c) => {
   console.log(`Bot ready: ${c.user.tag}`);
   await registerCommands();
   app.listen(cfg.webhookPort, () => console.log(`Webhook server on port ${cfg.webhookPort}`));
+  startCalendarPoller({
+    serviceAccountKeyPath: cfg.gcal.keyPath,
+    calendarId: cfg.gcal.calendarId,
+    pollSeconds: cfg.gcal.pollSeconds,
+    onNewBooking: onGCalNewBooking,
+    onCancellation: onGCalCancellation,
+  });
 });
 
 client.login(cfg.token);
