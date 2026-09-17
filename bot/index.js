@@ -4,7 +4,7 @@
  * Four responsibilities:
  *  1. Lead capture → deal post + instant auto-ack
  *  2. Speed-to-lead enforcement (5 / 10 / 15 min escalation ladder)
- *  3. Calendly sync (invitee.created / canceled / no_show)
+ *  3. Cal.com booking sync via Google Calendar poll (see bot/calendar.js)
  *  4. Wins tally (/win command + 🏆 reaction)
  */
 
@@ -24,7 +24,6 @@ import {
 import express from 'express';
 import cron from 'node-cron';
 import { DateTime } from 'luxon';
-import crypto from 'crypto';
 import 'dotenv/config';
 import { startCalendarPoller } from './calendar.js';
 
@@ -56,7 +55,6 @@ const cfg = {
     end: parseInt(process.env.COVERAGE_END_HOUR ?? '22'),
     tz: process.env.COVERAGE_TIMEZONE ?? 'Europe/Brussels',
   },
-  calendlySecret: process.env.CALENDLY_WEBHOOK_SECRET,
   webhookPort: parseInt(process.env.WEBHOOK_PORT ?? '3000'),
   gcal: {
     calendarId: process.env.GOOGLE_CALENDAR_ID ?? 'primary',
@@ -228,91 +226,10 @@ client.on(Events.MessageCreate, (message) => {
   }
 });
 
-// ─── 3. Calendly sync ─────────────────────────────────────────────────────────
-// Webhook endpoint receives Calendly events
-
-async function handleCalendlyEvent(event) {
-  const guild = await client.guilds.fetch(cfg.guildId);
-  const bookedCallsChannel = await guild.channels.fetch(cfg.channels.bookedCalls);
-  const forum = await guild.channels.fetch(cfg.channels.dealsForum);
-  const setterDesk = await guild.channels.fetch(cfg.channels.setterDesk);
-
-  const type = event.event;
-  const payload = event.payload;
-  const inviteeName = payload?.invitee?.name ?? 'Unknown';
-  const inviteeEmail = payload?.invitee?.email ?? '';
-  const startTime = payload?.event?.start_time ?? payload?.scheduled_event?.start_time;
-  const eventName = payload?.event_type?.name ?? payload?.event?.name ?? 'Discovery Call';
-  const cancelReason = payload?.cancellation?.reason ?? '';
-  const rescheduleUrl = payload?.invitee?.reschedule_url ?? '';
-
-  // Try to find the matching deal thread by name (best-effort)
-  async function findDealThread(name) {
-    const threads = await forum.threads.fetchActive();
-    return threads.threads.find((t) =>
-      t.name.toLowerCase().includes(name.toLowerCase().split(' ')[0])
-    ) ?? null;
-  }
-
-  if (type === 'invitee.created') {
-    // Move deal to 📅 call-booked
-    const thread = await findDealThread(inviteeName);
-    if (thread) await moveDealTag(thread, forum, '📅 call-booked');
-
-    await bookedCallsChannel.send({
-      embeds: [
-        new EmbedBuilder()
-          .setColor(0x57f287)
-          .setTitle('📅 Call Booked')
-          .addFields(
-            { name: 'Lead', value: inviteeName, inline: true },
-            { name: 'Email', value: inviteeEmail, inline: true },
-            { name: 'Event', value: eventName, inline: true },
-            { name: 'Time', value: startTime ? `<t:${Math.floor(new Date(startTime).getTime() / 1000)}:F>` : 'TBD', inline: false },
-            { name: 'Deal thread', value: thread ? thread.url : '—', inline: false },
-          )
-          .setTimestamp(),
-      ],
-      content: `<@&${cfg.roles.closer}> new call in queue ↑`,
-      allowedMentions: { roles: [cfg.roles.closer] },
-    });
-
-    // T-24h and T-1h reminders are handled by Calendly's native workflows.
-    // The bot registers a note in setter-desk for awareness.
-    await setterDesk.send({
-      content: `✅ **${inviteeName}** booked. Calendly reminders set for T-24h & T-1h.${thread ? `\nDeal: ${thread.url}` : ''}`,
-    });
-  }
-
-  if (type === 'invitee.canceled') {
-    const thread = await findDealThread(inviteeName);
-    await setterDesk.send({
-      content: [
-        `⚠️ **Booking canceled — ${inviteeName}**`,
-        cancelReason ? `Reason: ${cancelReason}` : '',
-        rescheduleUrl ? `Reschedule link: ${rescheduleUrl}` : '',
-        thread ? `Deal: ${thread.url}` : '',
-        `<@&${cfg.roles.setter}> run rebook sequence.`,
-      ].filter(Boolean).join('\n'),
-      allowedMentions: { roles: [cfg.roles.setter] },
-    });
-  }
-
-  if (type === 'invitee.no_show') {
-    const thread = await findDealThread(inviteeName);
-    if (thread) await moveDealTag(thread, forum, '🔍 qualifying'); // back to qualifying, not lost
-
-    await setterDesk.send({
-      content: [
-        `🚫 **No-show — ${inviteeName}**`,
-        `Deal moved back to 🔍 qualifying (not lost).`,
-        thread ? `Deal: ${thread.url}` : '',
-        `<@&${cfg.roles.setter}> run same-day rebook sequence now.`,
-      ].join('\n'),
-      allowedMentions: { roles: [cfg.roles.setter] },
-    });
-  }
-}
+// ─── 3. Call-booking sync ─────────────────────────────────────────────────────
+// Handled by the Google Calendar poller (bot/calendar.js) — see
+// onGCalNewBooking / onGCalCancellation further down. Cal.com bookings never
+// touch a webhook; the bot just reads them off the calendar every minute.
 
 // ─── 4. Wins tally ───────────────────────────────────────────────────────────
 
@@ -487,30 +404,12 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
   }
 });
 
-// ─── Express webhook server ───────────────────────────────────────────────────
+// ─── Express webhook server ─────────────────────────────────────────────────
+// Only used for manual/form lead intake — call bookings come from the
+// Google Calendar poller, not a webhook.
 
 const app = express();
 app.use(express.json());
-
-// Calendly webhook signature verification
-function verifyCalendlySignature(req) {
-  if (!cfg.calendlySecret) return true; // skip if no secret configured
-  const sig = req.headers['calendly-webhook-signature'];
-  if (!sig) return false;
-  const [t, v1] = sig.split(',').reduce((acc, part) => {
-    const [k, val] = part.split('=');
-    acc[k === 't' ? 0 : 1] = val;
-    return acc;
-  }, []);
-  const expected = crypto.createHmac('sha256', cfg.calendlySecret).update(`${t}.${JSON.stringify(req.body)}`).digest('hex');
-  return crypto.timingSafeEqual(Buffer.from(v1 ?? '', 'hex'), Buffer.from(expected, 'hex'));
-}
-
-app.post('/calendly', async (req, res) => {
-  if (!verifyCalendlySignature(req)) return res.status(401).send('Unauthorized');
-  res.sendStatus(200);
-  await handleCalendlyEvent(req.body).catch((err) => console.error('Calendly handler error:', err));
-});
 
 // Manual lead intake endpoint (for form/Whop webhook)
 app.post('/lead', async (req, res) => {
@@ -526,7 +425,7 @@ app.get('/health', (_req, res) => res.json({ status: 'ok', leads: newLeads.size 
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 
-// ─── Google Calendar handlers (Calendly-via-GCal path) ───────────────────────
+// ─── Google Calendar handlers (Cal.com bookings via calendar poll) ──────────
 
 async function findDealThreadByName(forum, name) {
   const threads = await forum.threads.fetchActive();
@@ -566,14 +465,14 @@ async function onGCalNewBooking(parsed) {
       embeds: [
         new EmbedBuilder()
           .setColor(0x57f287)
-          .setTitle('📅 Call Booked (via Calendly → Google Calendar)')
+          .setTitle('📅 Call Booked (via Cal.com → Google Calendar)')
           .addFields(
             { name: 'Source', value: `**${sourceLabel || 'Unknown'}**`, inline: true },
             { name: 'Lead', value: parsed.inviteeName || '—', inline: true },
             { name: 'Email', value: parsed.inviteeEmail || '—', inline: true },
             { name: 'Event', value: parsed.eventName || '—', inline: true },
             { name: 'Time', value: ts ? `<t:${ts}:F>` : 'TBD', inline: false },
-            { name: 'Calendly link', value: parsed.calendlyLink || '—', inline: false },
+            { name: 'Booking link', value: parsed.bookingLink || '—', inline: false },
             { name: 'Deal thread', value: thread.url, inline: false },
           )
           .setTimestamp(),

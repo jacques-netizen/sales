@@ -278,7 +278,7 @@ client.once('ready', async () => {
       name: 'booked-calls',
       type: ChannelType.GuildText,
       parent: catPipeline.id,
-      topic: 'Calendly bookings land here via webhook — the closer\'s call queue. Read-only feed.',
+      topic: 'Cal.com bookings land here — the closer\'s call queue. Read-only feed.',
       permissionOverwrites: overwrites({
         closer: RO,
         setter: RO,
@@ -406,7 +406,7 @@ client.once('ready', async () => {
         '',
         '**🎯 PIPELINE**',
         '`#💼deals` — the heart. One post = one deal. Tags = stages.',
-        '`#booked-calls` — Calendly bookings (read-only feed)',
+        '`#booked-calls` — Cal.com bookings (read-only feed)',
         '',
         '**🔥 FLOOR**',
         '`#wins` — post closes, leaderboard lives here',

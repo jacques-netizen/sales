@@ -1,16 +1,18 @@
 /**
- * Google Calendar poller — Calendly-flavored event detector
+ * Google Calendar poller — Cal.com booking detector
  *
  * Auth: OAuth2 with a saved refresh token (no service account key needed).
  * Run `npm run gcal-auth` once to log in via browser and save the token.
  *
- * Every minute, fetches upcoming events and looks for Calendly bookings.
- * An event counts ONLY if it contains:
- *   - a calendly.com link in the description, AND
- *   - the phrase "powered by calendly" (case-insensitive)
+ * Every minute, fetches upcoming events and looks for Cal.com bookings.
+ * An event counts ONLY if its description contains a Cal.com booking-manage
+ * link (https://cal.com/booking/<uid>, or your custom domain — see
+ * CAL_BOOKING_DOMAIN below). That link is Cal.com's standard "reschedule or
+ * cancel" footer, so it's a reliable fingerprint that won't fire on random
+ * meetings you put on the calendar by hand.
  *
  * Also extracts utm_source / utm_medium / utm_campaign from the event
- * description (populated via a hidden Calendly custom question pre-filled
+ * description (populated via a hidden Cal.com booking question pre-filled
  * from the booking link's query string) so every booking carries its
  * traffic source into Discord.
  *
@@ -24,8 +26,12 @@ import { OAuth2Client } from 'google-auth-library';
 import fs from 'fs';
 import path from 'path';
 
-const CALENDLY_FINGERPRINT = /powered by calendly/i;
-const CALENDLY_URL = /https?:\/\/(?:[\w-]+\.)?calendly\.com\/[^\s)>"']+/i;
+// Change via CAL_BOOKING_DOMAIN in .env if you're on a custom/white-labeled Cal.com domain.
+const CAL_BOOKING_DOMAIN = process.env.CAL_BOOKING_DOMAIN || 'cal.com';
+const CAL_BOOKING_URL = new RegExp(
+  `https?:\\/\\/(?:[\\w-]+\\.)?${CAL_BOOKING_DOMAIN.replace(/\./g, '\\.')}\\/booking\\/[\\w-]+`,
+  'i'
+);
 const TOKEN_PATH = './google-oauth-token.json';
 
 export function makeOAuth2Client() {
@@ -53,7 +59,7 @@ function extractUtm(desc) {
   const keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
 
   for (const key of keys) {
-    // Calendly renders custom question answers as "Label\n<answer>" (label on its own line,
+    // Cal.com renders booking question answers as "Label\n<answer>" (label on its own line,
     // answer on the next). Also tolerate "key: value" / "key - value" / "key=value" inline.
     const inline = desc.match(new RegExp(`${key}\\s*[:=\\-]\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
     if (inline) {
@@ -74,13 +80,14 @@ function extractUtm(desc) {
   return utm;
 }
 
-function parseCalendlyEvent(event) {
+function parseCalBooking(event) {
   const desc = event.description ?? '';
-  const summary = event.summary ?? 'Calendly Booking';
+  const summary = event.summary ?? 'Cal.com Booking';
 
   let inviteeName = null;
-  const inviteeMatch = desc.match(/Invitee\s*[:\-]\s*(.+?)(?:\r|\n|<)/i);
-  if (inviteeMatch) inviteeName = inviteeMatch[1].trim();
+  // Cal.com default title format: "{eventType} between {organizer} and {attendee}"
+  const betweenMatch = summary.match(/between\s+.+?\s+and\s+(.+)$/i);
+  if (betweenMatch) inviteeName = betweenMatch[1].trim();
   if (!inviteeName) {
     const withMatch = summary.match(/(?:with|w\/)\s+(.+)$/i);
     if (withMatch) inviteeName = withMatch[1].trim();
@@ -90,8 +97,8 @@ function parseCalendlyEvent(event) {
   const emailMatch = desc.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
   const inviteeEmail = emailMatch ? emailMatch[0] : '';
 
-  const linkMatch = desc.match(CALENDLY_URL);
-  const calendlyLink = linkMatch ? linkMatch[0] : '';
+  const linkMatch = desc.match(CAL_BOOKING_URL);
+  const bookingLink = linkMatch ? linkMatch[0] : '';
 
   const utm = extractUtm(desc);
 
@@ -102,7 +109,7 @@ function parseCalendlyEvent(event) {
     eventName: summary,
     startTime: event.start?.dateTime ?? event.start?.date,
     endTime: event.end?.dateTime ?? event.end?.date,
-    calendlyLink,
+    bookingLink,
     htmlLink: event.htmlLink,
     source: utm.utm_source ?? 'Unknown',
     medium: utm.utm_medium ?? null,
@@ -110,9 +117,9 @@ function parseCalendlyEvent(event) {
   };
 }
 
-function looksLikeCalendly(event) {
+function looksLikeCalBooking(event) {
   const desc = event.description ?? '';
-  return CALENDLY_FINGERPRINT.test(desc) && CALENDLY_URL.test(desc);
+  return CAL_BOOKING_URL.test(desc);
 }
 
 export function startCalendarPoller({
@@ -149,10 +156,10 @@ export function startCalendarPoller({
 
       for (const event of events) {
         if (event.status === 'cancelled') continue;
-        if (!looksLikeCalendly(event)) continue;
+        if (!looksLikeCalBooking(event)) continue;
 
         currentIds.add(event.id);
-        const parsed = parseCalendlyEvent(event);
+        const parsed = parseCalBooking(event);
 
         if (!seen.has(event.id)) {
           seen.set(event.id, parsed);
@@ -178,7 +185,7 @@ export function startCalendarPoller({
 
       if (!primed) {
         primed = true;
-        console.log(`[calendar] Primed with ${seen.size} existing Calendly events. Watching for new bookings.`);
+        console.log(`[calendar] Primed with ${seen.size} existing Cal.com bookings. Watching for new bookings.`);
       }
     } catch (err) {
       console.error('[calendar] sweep failed:', err.message);

@@ -45,7 +45,7 @@ npm run bot
 
 🎯 PIPELINE
   #💼deals          — forum: one post per deal, tags = stages
-  #booked-calls     — Calendly booking feed (read-only)
+  #booked-calls     — Cal.com booking feed (read-only)
 
 🔥 FLOOR
   #wins             — closes + leaderboard
@@ -67,27 +67,43 @@ npm run bot
 
 ### Speed-to-lead ladder
 - Cron checks every minute during coverage hours
-- 5 min untouched → DM Abdellah (setter)
-- 10 min → DM Axel (closer)
-- 15 min → DM Jacques (founder)
+- 5 min untouched → ping `@Setter` in #setter-desk
+- 10 min → ping `@Closer`
+- 15 min → ping `@Founder`
 - First reply in the thread clears the SLA clock
 
-### Calendly sync
-Point your Calendly webhook at `POST /calendly`:
-- `invitee.created` → moves deal to 📅 call-booked, posts to #booked-calls, pings closer
-- `invitee.canceled` → flags + pings setter to rebook
-- `invitee.no_show` → moves deal back to 🔍 qualifying (not lost), pings setter
+### Cal.com booking sync (via Google Calendar poll)
+No webhook, no public URL — the bot polls your Google Calendar every 60s (`GOOGLE_CALENDAR_POLL_SECONDS`)
+and detects Cal.com bookings by their standard "reschedule or cancel" link in the event description
+(`https://cal.com/booking/<uid>` — change `CAL_BOOKING_DOMAIN` if you're on a custom domain):
+- New booking spotted → moves matching deal to 📅 call-booked (or creates one if none exists), posts to #booked-calls, pings `@Closer`
+- Booking disappears from the calendar (cancel/reschedule) → moves deal back to 🔍 qualifying, pings `@Setter` to rebook
+
+**UTM source tracking:** if you add a hidden Cal.com booking question named `utm_source`
+(optionally `utm_medium` / `utm_campaign`) pre-filled from your link's query string, the bot
+extracts it from the calendar event and shows it on every booking — in #booked-calls and in
+the deal's own Source field. See "UTM source setup" below.
 
 ### Wins tally
 - `/win [deal] [amount]` — logs a close, posts win card, updates leaderboard, moves deal to 🏆 won, posts to #won-handoff
 - `/leaderboard` — shows current standings
 - `/pipeline` — live stage count across all open deals
 
-## Calendly webhook setup
-1. Calendly → Integrations → Webhooks → New webhook
-2. URL: `https://your-domain.com/calendly`
-3. Events: `invitee.created`, `invitee.canceled`, `invitee.no_show`
-4. Copy the signing secret → `CALENDLY_WEBHOOK_SECRET` in `.env`
+## Google Calendar setup (Cal.com bookings)
+1. Follow the OAuth steps to get `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (Google Cloud Console → OAuth 2.0 Client ID, Desktop app type)
+2. Run `npm run gcal-auth` once — log in via the printed URL, paste the code back
+3. Set `GOOGLE_CALENDAR_ID` in `.env` to the calendar where Cal.com bookings land
+4. `npm run bot` — it prints `[calendar] Primed with N existing Cal.com bookings` on start
+
+## UTM source setup
+1. Cal.com → each event type → **Advanced** → **Booking questions** → add a question
+2. Name it exactly `utm_source`, type: Text, toggle **Hidden**
+3. Repeat for `utm_medium` / `utm_campaign` if you want more than just source
+4. Make sure your tracking links use matching query param names, e.g.:
+   ```
+   https://cal.com/you/discovery-call?utm_source=instagram
+   ```
+5. Cal.com auto-fills the hidden question from the URL param of the same name — no extra setup needed after that
 
 ## Deal stages
 
@@ -95,7 +111,7 @@ Point your Calendly webhook at `POST /calendly`:
 |-----|-------|-------|-----|
 | 🆕 new | New Lead | Setter | < 5 min |
 | 🔍 qualifying | Qualifying | Setter | same day |
-| 📅 call-booked | Call Booked | Setter → Closer | T-24h & T-1h reminders |
+| 📅 call-booked | Call Booked | Setter → Closer | detected within 60s of booking |
 | 🎯 pitched | Pitched | Closer | follow-up < 24h |
 | 🤝 negotiating | Negotiating | Closer | re-touch < 24h |
 | 🏆 won | Closed-Won | Closer / Founder | same day → #won-handoff |
