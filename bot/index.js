@@ -540,25 +540,41 @@ async function onGCalNewBooking(parsed) {
     const bookedCallsChannel = await guild.channels.fetch(cfg.channels.bookedCalls);
     const forum = await guild.channels.fetch(cfg.channels.dealsForum);
 
-    const thread = await findDealThreadByName(forum, parsed.inviteeName);
-    if (thread) await moveDealTag(thread, forum, '📅 call-booked');
+    let thread = await findDealThreadByName(forum, parsed.inviteeName);
+
+    if (thread) {
+      await moveDealTag(thread, forum, '📅 call-booked');
+    } else {
+      // No existing deal (call booked direct from a UTM link, setter never touched it) —
+      // create one now so the source isn't lost.
+      thread = await createDealPost(forum, {
+        leadName: parsed.inviteeName,
+        source: parsed.source,
+        contact: parsed.inviteeEmail || parsed.inviteeName,
+        offerInterest: 'TBD',
+        estDealSize: 'Unknown',
+      });
+      await moveDealTag(thread, forum, '📅 call-booked');
+    }
 
     const ts = parsed.startTime ? Math.floor(new Date(parsed.startTime).getTime() / 1000) : null;
+    const sourceLabel = [parsed.source, parsed.medium, parsed.campaign].filter(Boolean).join(' / ');
 
     await bookedCallsChannel.send({
-      content: `<@&${cfg.roles.closer}> new call in queue ↑`,
+      content: `<@&${cfg.roles.closer}> new call in queue — **source: ${parsed.source}** ↑`,
       allowedMentions: { roles: [cfg.roles.closer] },
       embeds: [
         new EmbedBuilder()
           .setColor(0x57f287)
           .setTitle('📅 Call Booked (via Calendly → Google Calendar)')
           .addFields(
+            { name: 'Source', value: `**${sourceLabel || 'Unknown'}**`, inline: true },
             { name: 'Lead', value: parsed.inviteeName || '—', inline: true },
             { name: 'Email', value: parsed.inviteeEmail || '—', inline: true },
             { name: 'Event', value: parsed.eventName || '—', inline: true },
             { name: 'Time', value: ts ? `<t:${ts}:F>` : 'TBD', inline: false },
             { name: 'Calendly link', value: parsed.calendlyLink || '—', inline: false },
-            { name: 'Deal thread', value: thread ? thread.url : '— (no matching deal — create one)', inline: false },
+            { name: 'Deal thread', value: thread.url, inline: false },
           )
           .setTimestamp(),
       ],

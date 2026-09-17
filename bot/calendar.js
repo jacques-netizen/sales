@@ -9,6 +9,11 @@
  *   - a calendly.com link in the description, AND
  *   - the phrase "powered by calendly" (case-insensitive)
  *
+ * Also extracts utm_source / utm_medium / utm_campaign from the event
+ * description (populated via a hidden Calendly custom question pre-filled
+ * from the booking link's query string) so every booking carries its
+ * traffic source into Discord.
+ *
  * Two state changes are reported to the bot:
  *   - new event spotted    → onNewBooking(parsedEvent)
  *   - tracked event gone   → onCancellation(parsedEvent)
@@ -43,6 +48,32 @@ export function loadSavedToken(oAuth2Client) {
   return true;
 }
 
+function extractUtm(desc) {
+  const utm = {};
+  const keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+
+  for (const key of keys) {
+    // Calendly renders custom question answers as "Label\n<answer>" (label on its own line,
+    // answer on the next). Also tolerate "key: value" / "key - value" / "key=value" inline.
+    const inline = desc.match(new RegExp(`${key}\\s*[:=\\-]\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
+    if (inline) {
+      utm[key] = inline[1].trim();
+      continue;
+    }
+    const qa = desc.match(new RegExp(`${key}\\s*[\\r\\n]+\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
+    if (qa) utm[key] = qa[1].trim();
+  }
+
+  // Fallback: some setups keep the original UTM-tagged link in the description.
+  // Pull params straight off it if we're still missing source.
+  if (!utm.utm_source) {
+    const linkMatch = desc.match(/https?:\/\/[^\s)>"']*utm_source=([^\s&)>"']+)/i);
+    if (linkMatch) utm.utm_source = decodeURIComponent(linkMatch[1]);
+  }
+
+  return utm;
+}
+
 function parseCalendlyEvent(event) {
   const desc = event.description ?? '';
   const summary = event.summary ?? 'Calendly Booking';
@@ -62,6 +93,8 @@ function parseCalendlyEvent(event) {
   const linkMatch = desc.match(CALENDLY_URL);
   const calendlyLink = linkMatch ? linkMatch[0] : '';
 
+  const utm = extractUtm(desc);
+
   return {
     eventId: event.id,
     inviteeName,
@@ -71,6 +104,9 @@ function parseCalendlyEvent(event) {
     endTime: event.end?.dateTime ?? event.end?.date,
     calendlyLink,
     htmlLink: event.htmlLink,
+    source: utm.utm_source ?? 'Unknown',
+    medium: utm.utm_medium ?? null,
+    campaign: utm.utm_campaign ?? null,
   };
 }
 
