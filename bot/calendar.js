@@ -34,6 +34,11 @@ const CAL_BOOKING_URL = new RegExp(
 );
 const TOKEN_PATH = './google-oauth-token.json';
 
+// Each traffic source gets its own Cal.com event type, whose "Event name in
+// calendar" carries a [src:NAME] marker. That keeps the booking form clean —
+// no tracking field for the lead to see.
+const SOURCE_MARKER = /\[src:\s*([^\]]+)\]/i;
+
 export function makeOAuth2Client() {
   return new OAuth2Client(
     process.env.GOOGLE_CLIENT_ID,
@@ -80,7 +85,17 @@ function extractUtm(desc) {
 
 function parseCalBooking(event) {
   const desc = event.description ?? '';
-  const summary = event.summary ?? 'Cal.com Booking';
+  const rawSummary = event.summary ?? 'Cal.com Booking';
+
+  // Preferred: a [src:NAME] marker on the event type's calendar name.
+  // Falls back to utm_* booking fields if this event type still uses those.
+  const markerMatch = rawSummary.match(SOURCE_MARKER) ?? desc.match(SOURCE_MARKER);
+  const utm = extractUtm(desc);
+  const source = markerMatch?.[1]?.trim() || utm.utm_source || 'Unknown';
+
+  // Strip the marker before anything else reads the title, so it can't leak
+  // into the lead's name or the event name shown in Discord.
+  const summary = rawSummary.replace(SOURCE_MARKER, '').replace(/\s{2,}/g, ' ').trim();
 
   // The attendee list is authoritative for who booked — the description lists the
   // organiser's email first, so scraping it would pick up our own address.
@@ -102,8 +117,6 @@ function parseCalBooking(event) {
   const linkMatch = desc.match(CAL_BOOKING_URL);
   const bookingLink = linkMatch ? linkMatch[0] : '';
 
-  const utm = extractUtm(desc);
-
   return {
     eventId: event.id,
     inviteeName,
@@ -113,7 +126,7 @@ function parseCalBooking(event) {
     endTime: event.end?.dateTime ?? event.end?.date,
     bookingLink,
     htmlLink: event.htmlLink,
-    source: utm.utm_source ?? 'Unknown',
+    source,
     medium: utm.utm_medium ?? null,
     campaign: utm.utm_campaign ?? null,
   };
