@@ -54,24 +54,22 @@ export function loadSavedToken(oAuth2Client) {
   return true;
 }
 
+// Cal.com writes "undefined" into the description for optional questions
+// the booker left blank.
+const isBlank = (v) => !v || v.trim() === '' || v.trim().toLowerCase() === 'undefined';
+
 function extractUtm(desc) {
   const utm = {};
   const keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
 
   for (const key of keys) {
-    // Cal.com renders booking question answers as "Label\n<answer>" (label on its own line,
-    // answer on the next). Also tolerate "key: value" / "key - value" / "key=value" inline.
-    const inline = desc.match(new RegExp(`${key}\\s*[:=\\-]\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
-    if (inline) {
-      utm[key] = inline[1].trim();
-      continue;
-    }
-    const qa = desc.match(new RegExp(`${key}\\s*[\\r\\n]+\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
-    if (qa) utm[key] = qa[1].trim();
+    // Cal.com renders each booking question as "<Label>:\n<answer>", using the field's
+    // LABEL (not its identifier) — so the label must be the utm_* key for this to match.
+    const match = desc.match(new RegExp(`${key}\\s*[:=\\-]\\s*(.+?)(?:\\r|\\n|<)`, 'i'));
+    if (match && !isBlank(match[1])) utm[key] = match[1].trim();
   }
 
   // Fallback: some setups keep the original UTM-tagged link in the description.
-  // Pull params straight off it if we're still missing source.
   if (!utm.utm_source) {
     const linkMatch = desc.match(/https?:\/\/[^\s)>"']*utm_source=([^\s&)>"']+)/i);
     if (linkMatch) utm.utm_source = decodeURIComponent(linkMatch[1]);
@@ -84,18 +82,22 @@ function parseCalBooking(event) {
   const desc = event.description ?? '';
   const summary = event.summary ?? 'Cal.com Booking';
 
-  let inviteeName = null;
-  // Cal.com default title format: "{eventType} between {organizer} and {attendee}"
-  const betweenMatch = summary.match(/between\s+.+?\s+and\s+(.+)$/i);
-  if (betweenMatch) inviteeName = betweenMatch[1].trim();
+  // The attendee list is authoritative for who booked — the description lists the
+  // organiser's email first, so scraping it would pick up our own address.
+  const invitee = (event.attendees ?? []).find((a) => !a.self && !a.organizer);
+  const inviteeEmail = invitee?.email ?? '';
+
+  // Cal.com default title format: "{eventType} between {organiser} and {attendee}"
+  let inviteeName = invitee?.displayName ?? null;
+  if (!inviteeName) {
+    const betweenMatch = summary.match(/\bbetween\s+.+?\s+and\s+(.+)$/i);
+    if (betweenMatch) inviteeName = betweenMatch[1].trim();
+  }
   if (!inviteeName) {
     const withMatch = summary.match(/(?:with|w\/)\s+(.+)$/i);
     if (withMatch) inviteeName = withMatch[1].trim();
   }
-  if (!inviteeName) inviteeName = summary;
-
-  const emailMatch = desc.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
-  const inviteeEmail = emailMatch ? emailMatch[0] : '';
+  if (!inviteeName) inviteeName = inviteeEmail || summary;
 
   const linkMatch = desc.match(CAL_BOOKING_URL);
   const bookingLink = linkMatch ? linkMatch[0] : '';
@@ -121,6 +123,8 @@ function looksLikeCalBooking(event) {
   const desc = event.description ?? '';
   return CAL_BOOKING_URL.test(desc);
 }
+
+export const __test = { parseCalBooking, looksLikeCalBooking, extractUtm };
 
 export function startCalendarPoller({
   calendarId = 'primary',
